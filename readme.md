@@ -1,4 +1,4 @@
-# WeAct Studio USB2CANFD V1 Firmware
+# WeAct Studio USB2CANFD V1 SLCAN Firmware
 
 ## Firmware packaging
 * Open firmware_packager(https://github.com/WeActStudio/WeActStudio.USB2CANFDV1/blob/master/Tools/WeActStudio_Upgrade_Tool.7z), select the firmware, check Do not encrypt, add character watermark, select the header size, and click Pack.
