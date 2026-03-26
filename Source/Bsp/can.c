@@ -466,7 +466,7 @@ void can_set_autoretransmit(uint8_t autoretransmit)
     }
 }
 
-// Send a message on the CAN bus. Called from USB ISR.
+// Send a message on the CAN bus.
 int32_t can_tx(can_tx_msg_t *tx_msg)
 {
     // If when we increment the head we're going to hit the tail
@@ -522,7 +522,7 @@ void can_tx_process(void)
                 else
                 {
                     osMemoryPoolFree(can_tx_msg_MemPool, tx_msg);
-										BOARD_LEDTX_ON();
+					BOARD_LEDTX_ON();
                 }
             }
             else
@@ -574,11 +574,11 @@ void can_rx_process(void)
                 cdc_transmit(msg_buf, msg_len);
             }
             osMemoryPoolFree(can_rx_msg_MemPool, rx_msg);
-						BOARD_LEDRX_ON();
+			BOARD_LEDRX_ON();
         }
         else
         {
-					BOARD_LEDRX_OFF();
+			BOARD_LEDRX_OFF();
         }
     }
 }

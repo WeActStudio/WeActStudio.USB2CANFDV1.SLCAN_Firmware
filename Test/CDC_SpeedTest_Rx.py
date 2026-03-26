@@ -19,31 +19,19 @@ aux_device_ser.write("O\r".encode('utf-8'))
 print('port_open ',aux_device_ser.port,aux_device_ser.read_until())
 
 tick_1s = int(round(time.time() * 1000)) + 1000
-tx_data_len = 0
 rx_data_len = 0
-test_frame_count = 100
-test_frame = ("b000F"+"aabb"*32+"\r")*test_frame_count
-test_write = test_frame.encode('utf-8')
-tx_Success = 0
+rx_data_len_sum = 0
 while True:
-    aux_device_ser.write(test_write)
-
-    data = aux_device_ser.read(test_frame_count)
-
-    if data == ('\r'*test_frame_count).encode('utf-8'):
-        tx_Success = tx_Success + test_frame_count
-
+    data = aux_device_ser.read_all()
     rx_data_len = rx_data_len + len(data)
-    tx_data_len = tx_data_len + len(test_write)
+    rx_data_len_sum = len_data_len_sum = len(data) + rx_data_len_sum
+    # print(aux_device_ser.port,data,len(data))
 
     ms = int(round(time.time() * 1000))
     if ms > tick_1s:
         tick_1s = ms + 1000
-        print('tx speed:',tx_data_len,'Byte/S',tx_data_len/1024,'kByte/S')
-        print('tx_Success:',tx_Success)
         print('rx speed:',rx_data_len,'Byte/S',rx_data_len/1024,'kByte/S')
-        print('')
-        tx_data_len = 0
+        print('rx_data_len_sum:',rx_data_len_sum,'Count',rx_data_len_sum/134)
         rx_data_len = 0
 
         if check_key_thread.is_alive() == False:

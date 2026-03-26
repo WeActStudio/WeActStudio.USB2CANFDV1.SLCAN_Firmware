@@ -1,6 +1,6 @@
 import serial
 
-aux_device_ser = serial.Serial('COM43', 1152000, 8, 'N', 1,timeout=1)
+aux_device_ser = serial.Serial('COM29', 1152000, 8, 'N', 1,timeout=1)
 
 aux_device_ser.write("S8\r".encode('utf-8'))
 aux_device_ser.write("Y5\r".encode('utf-8'))

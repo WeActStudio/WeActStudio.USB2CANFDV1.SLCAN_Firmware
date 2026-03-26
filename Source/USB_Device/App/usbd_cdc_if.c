@@ -56,12 +56,13 @@ osMemoryPoolId_t usb_rx_msg_MemPool;
 osMemoryPoolId_t usb_tx_msg_MemPool;
 
 osSemaphoreId_t usb_tx_lock_Semaphore;
+osSemaphoreId_t usb_rx_full_lock_Semaphore;
 
 osThreadId_t usbtxTaskHandle;
 const osThreadAttr_t usbtxTask_attributes = {
     .name = "usbtxTask",
     .priority = (osPriority_t)osPriorityAboveNormal,
-    .stack_size = 128 * 8};
+    .stack_size = 128 * 4};
 void usbtxTask(void *argument);
 
 osThreadId_t usbrxTaskHandle;
@@ -179,6 +180,7 @@ void cdc_task_init(void)
   usb_rx_msg_MemPool = osMemoryPoolNew(16, CDC_DATA_FS_MAX_PACKET_SIZE, NULL);
 
   usb_tx_lock_Semaphore = osSemaphoreNew(1U, 1U, NULL);
+  usb_rx_full_lock_Semaphore = osSemaphoreNew(1U, 0U, NULL);
 
   usbtxTaskHandle = osThreadNew(usbtxTask, NULL, &usbtxTask_attributes);
   usbrxTaskHandle = osThreadNew(usbrxTask, NULL, &usbrxTask_attributes);
@@ -325,30 +327,29 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  if ((osMemoryPoolGetSpace(usb_rx_msg_MemPool) == 0))
-  {
-    USBD_CDC_SetRxBuffer(&hUsbDeviceFS, Buf);
-    USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-    return USBD_OK;
-  }
+  usb_rx_msg_buf_t usb_rx_msg_buf;
+  uint8_t *usb_rx_buf;
+
+  usb_rx_msg_buf.buf = Buf;
+  usb_rx_msg_buf.len = Len[0];
+  if (__get_IPSR() != 0U)
+    xQueueSendToBackFromISR(usb_rx_Queue, &usb_rx_msg_buf, NULL);
   else
+    xQueueSendToBack(usb_rx_Queue, &usb_rx_msg_buf, 0);
+
+  if ((osMemoryPoolGetSpace(usb_rx_msg_MemPool) > 0))
   {
-    usb_rx_msg_buf_t usb_rx_msg_buf;
-    uint8_t *usb_rx_buf;
-
-    usb_rx_msg_buf.buf = Buf;
-    usb_rx_msg_buf.len = Len[0];
-    if (__get_IPSR() != 0U)
-      xQueueSendToBackFromISR(usb_rx_Queue, &usb_rx_msg_buf, NULL);
-    else
-      xQueueSendToBack(usb_rx_Queue, &usb_rx_msg_buf, 0);
-
     usb_rx_buf = (uint8_t *)osMemoryPoolAlloc(usb_rx_msg_MemPool, 0U);
     USBD_CDC_SetRxBuffer(&hUsbDeviceFS, usb_rx_buf);
     USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-
-    return (USBD_OK);
   }
+  else
+  {
+    osSemaphoreRelease(usb_rx_full_lock_Semaphore);
+  }
+
+  return (USBD_OK);
+  
   /* USER CODE END 6 */
 }
 
@@ -444,7 +445,9 @@ void usbtxTask(void *argument)
 	usb_tx_msg_buf_t *usb_tx_msg_buf1;
   osStatus_t status;
 	
-	uint8_t tx_buf[SLCAN_MTU*2];
+//	uint8_t tx_buf[SLCAN_MTU*10];
+	uint8_t *tx_buf = pvPortMalloc(SLCAN_MTU*10);
+
 	uint32_t tx_len;
 
   for (;;)
@@ -454,15 +457,22 @@ void usbtxTask(void *argument)
     {
       if (xQueueReceive(usb_tx_Queue, &usb_tx_msg_buf, osWaitForever) == pdPASS)
       {
-				memcpy(tx_buf,usb_tx_msg_buf->data,usb_tx_msg_buf->len);
-				tx_len = usb_tx_msg_buf->len;
-				osMemoryPoolFree(usb_tx_msg_MemPool, usb_tx_msg_buf);
-				if (xQueueReceive(usb_tx_Queue, &usb_tx_msg_buf1, 0) == pdPASS)
-				{
-					memcpy(&tx_buf[tx_len],usb_tx_msg_buf1->data,usb_tx_msg_buf1->len);
-					tx_len += usb_tx_msg_buf1->len;
-					osMemoryPoolFree(usb_tx_msg_MemPool, usb_tx_msg_buf1);
-				}
+        memcpy(tx_buf,usb_tx_msg_buf->data,usb_tx_msg_buf->len);
+        tx_len = usb_tx_msg_buf->len;
+        osMemoryPoolFree(usb_tx_msg_MemPool, usb_tx_msg_buf);
+
+        while (xQueueReceive(usb_tx_Queue, &usb_tx_msg_buf1, 0) == pdPASS)
+        {
+          memcpy(&tx_buf[tx_len],usb_tx_msg_buf1->data,usb_tx_msg_buf1->len);
+          tx_len += usb_tx_msg_buf1->len;
+          osMemoryPoolFree(usb_tx_msg_MemPool, usb_tx_msg_buf1);
+
+          if (tx_len > SLCAN_MTU * 9)
+          {
+            break;
+          }
+        }
+        
         USBD_CDC_SetTxBuffer(&hUsbDeviceFS, tx_buf, tx_len);
         USBD_CDC_TransmitPacket(&hUsbDeviceFS);
       }
@@ -473,20 +483,15 @@ void usbtxTask(void *argument)
     }
     else if (status == osErrorTimeout)
     {
-      // osMemoryPoolFree(usb_tx_msg_MemPool, usb_tx_msg_buf);
-      slcan_init();
-
-      USBD_Stop(&hUsbDeviceFS);
+//      slcan_init();
+//      USBD_Stop(&hUsbDeviceFS);
 
       xQueueReset(usb_tx_Queue);
       osMemoryPoolDelete(usb_tx_msg_MemPool);
       usb_tx_msg_MemPool = osMemoryPoolNew(16, sizeof(usb_tx_msg_buf_t), NULL);
 
-      //			xQueueReset(usb_rx_Queue);
-      //			osMemoryPoolDelete(usb_rx_msg_MemPool);
-      //			usb_rx_msg_MemPool = osMemoryPoolNew(16, CDC_DATA_FS_MAX_PACKET_SIZE, NULL);
+//      USBD_Start(&hUsbDeviceFS);
 
-      USBD_Start(&hUsbDeviceFS);
       osSemaphoreRelease(usb_tx_lock_Semaphore);
     }
   }
@@ -497,7 +502,8 @@ void usbrxTask(void *argument)
 {
   usb_rx_msg_buf_t usb_rx_msg;
   int32_t result = 0;
-	slcan_str_index = 0;
+  slcan_str_index = 0;
+  osStatus_t status;
   for (;;)
   {
     if (xQueueReceive(usb_rx_Queue, &usb_rx_msg, 10) == pdPASS)
@@ -537,6 +543,15 @@ void usbrxTask(void *argument)
         }
       }
       osMemoryPoolFree(usb_rx_msg_MemPool, usb_rx_msg.buf);
+
+      status = osSemaphoreAcquire(usb_rx_full_lock_Semaphore, 0);
+      if (status == osOK)
+      {
+        uint8_t *usb_rx_buf;
+        usb_rx_buf = (uint8_t *)osMemoryPoolAlloc(usb_rx_msg_MemPool, 0U);
+        USBD_CDC_SetRxBuffer(&hUsbDeviceFS, usb_rx_buf);
+        USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+      }
     }
     else
     {
@@ -565,7 +580,7 @@ void cdc_task_monitor(void)
 // Enqueue data for transmission over USB CDC to host
 void cdc_transmit(uint8_t *buf, uint16_t len)
 {
-  if ((osMemoryPoolGetSpace(usb_tx_msg_MemPool) != 0) && (uxQueueSpacesAvailable(usb_tx_Queue) != 0))
+  if (osMemoryPoolGetSpace(usb_tx_msg_MemPool) != 0)
   {
     usb_tx_msg_buf_t *usb_tx_msg_buf;
     usb_tx_msg_buf = (usb_tx_msg_buf_t *)osMemoryPoolAlloc(usb_tx_msg_MemPool, 0U);
