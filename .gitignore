@@ -41,7 +41,7 @@ stm32.mak
 /support/ozone
 
 # artefacts for Visual Studio Code
-/.vscode/
+.vscode
 
 # artefacts for CLion
 /cmake-build-debug/
@@ -49,5 +49,3 @@ stm32.mak
 .vagrant
 ubuntu*.log
 /.vs
-
-*/.vscode/
