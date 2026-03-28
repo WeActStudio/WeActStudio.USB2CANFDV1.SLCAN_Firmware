@@ -11,7 +11,7 @@ def check_key():
 check_key_thread = threading.Thread(target=check_key)
 check_key_thread.start()
 
-aux_device_ser = serial.Serial('COM29', 1152000, 8, 'N', 1,timeout=1)
+aux_device_ser = serial.Serial('COM45', 1152000, 8, 'N', 1,timeout=1)
 
 aux_device_ser.write("S8\r".encode('utf-8'))
 aux_device_ser.write("Y5\r".encode('utf-8'))
@@ -19,6 +19,7 @@ aux_device_ser.write("O\r".encode('utf-8'))
 print('port_open ',aux_device_ser.port,aux_device_ser.read_until())
 
 tick_1s = int(round(time.time() * 1000)) + 1000
+rx_frame_len = len(("b000F"+"aabb"*32+"\r"))
 rx_data_len = 0
 rx_data_len_sum = 0
 while True:
@@ -31,7 +32,7 @@ while True:
     if ms > tick_1s:
         tick_1s = ms + 1000
         print('rx speed:',rx_data_len,'Byte/S',rx_data_len/1024,'kByte/S')
-        print('rx_data_len_sum:',rx_data_len_sum,'Count',rx_data_len_sum/134)
+        print('rx_data_len_sum:',rx_data_len_sum,'Count',rx_data_len_sum/rx_frame_len)
         rx_data_len = 0
 
         if check_key_thread.is_alive() == False:

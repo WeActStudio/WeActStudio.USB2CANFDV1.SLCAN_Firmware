@@ -19,6 +19,7 @@ extern FDCAN_HandleTypeDef can_handle;
 enum can_bus_state bus_state;
 uint32_t can_mode = FDCAN_MODE_NORMAL;
 FunctionalState can_autoretransmit = DISABLE;
+uint32_t can_tx_frame_count = 0;
 
 // Structure for CAN/FD bitrate configuration
 typedef struct can_bitrate_cfg_
@@ -150,6 +151,8 @@ void can_enable(void)
         bus_state = ON_BUS;
 
         osThreadFlagsSet(ledrdyTaskHandle, LED_STATE_BLINK_200MS);
+
+        can_tx_frame_count = 0;
     }
 }
 
@@ -363,7 +366,7 @@ void can_set_bitrate(enum can_bitrate bitrate)
         break;
     case CAN_BITRATE_800K:
         bitrate_nominal.prescaler = 1;
-        bitrate_nominal.sjw = 9;
+        bitrate_nominal.sjw = 8;
         bitrate_nominal.time_seg1 = 65;
         bitrate_nominal.time_seg2 = 9;
         break;
@@ -517,12 +520,14 @@ void can_tx_process(void)
                 if (status != HAL_OK)
                 {
                     osMemoryPoolFree(can_tx_msg_MemPool, tx_msg);
+                    cdc_transmit(SLCAN_RET_ERR, SLCAN_RET_LEN);
                     // xQueueSendToFront(can_tx_Queue, &tx_msg, 0);
                 }
                 else
                 {
                     osMemoryPoolFree(can_tx_msg_MemPool, tx_msg);
 					BOARD_LEDTX_ON();
+                    can_tx_frame_count++;
                 }
             }
             else
@@ -623,27 +628,14 @@ void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t ErrorSt
     }
 }
 
-static uint32_t error_tick = 1;
 void HAL_FDCAN_ErrorCallback(FDCAN_HandleTypeDef *hfdcan)
 {
-    uint32_t tick;
-    static uint32_t tick_last = 0;
-    uint32_t can_err_status = hfdcan->Instance->PSR;
-    if (can_err_status & FDCAN_PSR_BO)
+    if (hfdcan->ErrorCode == HAL_FDCAN_ERROR_PROTOCOL_ARBT || hfdcan->ErrorCode == HAL_FDCAN_ERROR_PROTOCOL_DATA)
     {
-        error_tick = 1;
-    }
-    else
-    {
-        if (hfdcan->ErrorCode == HAL_FDCAN_ERROR_PROTOCOL_ARBT || hfdcan->ErrorCode == HAL_FDCAN_ERROR_PROTOCOL_DATA)
+        if(can_tx_frame_count)
         {
-            tick = HAL_GetTick();
-            if (tick >= tick_last)
-            {
-                cdc_transmit(SLCAN_RET_ERR, SLCAN_RET_LEN);
-                tick_last = tick + error_tick;
-                error_tick = 0;
-            }
+            can_tx_frame_count--;
+            cdc_transmit(SLCAN_RET_ERR, SLCAN_RET_LEN);
         }
     }
     hfdcan->ErrorCode = 0;
@@ -651,7 +643,10 @@ void HAL_FDCAN_ErrorCallback(FDCAN_HandleTypeDef *hfdcan)
 
 void HAL_FDCAN_TxBufferCompleteCallback(FDCAN_HandleTypeDef *hfdcan, uint32_t BufferIndexes)
 {
-    error_tick = 0;
+    if(can_tx_frame_count)
+    {
+        can_tx_frame_count--;
+    }
     cdc_transmit(SLCAN_RET_OK, SLCAN_RET_LEN);
 }
 
