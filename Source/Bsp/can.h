@@ -77,6 +77,8 @@ extern "C"
     int32_t can_set_data_bitrate3(uint8_t div, uint8_t seg1, uint8_t seg2);
     void can_set_silent(uint8_t silent);
     void can_set_autoretransmit(uint8_t autoretransmit);
+    void can_set_std_filter(uint16_t id, uint16_t mask);
+    void can_set_ext_filter(uint32_t id, uint32_t mask);
     int32_t can_tx(can_tx_msg_t *tx_msg);
     void can_tx_process(void);
 		void can_rx_process(void);

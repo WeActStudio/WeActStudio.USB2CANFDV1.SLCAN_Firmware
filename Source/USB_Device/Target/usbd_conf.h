@@ -54,7 +54,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-#define CDC_FS_BINTERVAL                            0x1U
+#define CDC_FS_BINTERVAL                            0x0U
 /* USER CODE END PV */
 /**
   * @}

@@ -34,8 +34,6 @@
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-uint8_t slcan_str[SLCAN_MTU];
-uint8_t slcan_str_index = 0;
 
 typedef struct
 {
@@ -71,8 +69,6 @@ const osThreadAttr_t usbrxTask_attributes = {
     .priority = (osPriority_t)osPriorityAboveNormal,
     .stack_size = 128 * 4};
 void usbrxTask(void *argument);
-
-static uint8_t usb_rx_response_en;
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -171,13 +167,11 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_DECLARATION */
 void cdc_task_init(void)
 {
-  usb_rx_response_en = 1;
+  usb_tx_Queue = xQueueCreate(128, sizeof(uint32_t));
+  usb_rx_Queue = xQueueCreate(128, sizeof(usb_rx_msg_buf_t));
 
-  usb_tx_Queue = xQueueCreate(16, sizeof(uint32_t));
-  usb_rx_Queue = xQueueCreate(16, sizeof(usb_rx_msg_buf_t));
-
-  usb_tx_msg_MemPool = osMemoryPoolNew(16, sizeof(usb_tx_msg_buf_t), NULL);
-  usb_rx_msg_MemPool = osMemoryPoolNew(16, CDC_DATA_FS_MAX_PACKET_SIZE, NULL);
+  usb_tx_msg_MemPool = osMemoryPoolNew(128, sizeof(usb_tx_msg_buf_t), NULL);
+  usb_rx_msg_MemPool = osMemoryPoolNew(128, CDC_DATA_FS_MAX_PACKET_SIZE, NULL);
 
   usb_tx_lock_Semaphore = osSemaphoreNew(1U, 1U, NULL);
   usb_rx_full_lock_Semaphore = osSemaphoreNew(1U, 0U, NULL);
@@ -210,7 +204,6 @@ USBD_CDC_ItfTypeDef USBD_Interface_fops_FS =
 static int8_t CDC_Init_FS(void)
 {
   /* USER CODE BEGIN 3 */
-  slcan_str_index = 0;
 
   // USBD_CDC_SetTxBuffer(&hUsbDeviceFS, tx_linbuf, 0);
 
@@ -498,24 +491,50 @@ void usbtxTask(void *argument)
 }
 #endif
 
+typedef enum {
+    PARSE_IDLE,
+    PARSE_SLCAN,
+    PARSE_RAW_LENGTH,
+    PARSE_RAW
+
+} ParseState;
+
 void usbrxTask(void *argument)
 {
   usb_rx_msg_buf_t usb_rx_msg;
   int32_t result = 0;
-  slcan_str_index = 0;
   osStatus_t status;
+  
+  ParseState state = PARSE_IDLE;
+  uint8_t data_index = 0;
+  uint8_t raw_length = 0;
+  uint8_t *data = pvPortMalloc(SLCAN_MTU);
   for (;;)
   {
     if (xQueueReceive(usb_rx_Queue, &usb_rx_msg, 10) == pdPASS)
     {
-      //  Process one whole buffer
       for (uint32_t i = 0; i < usb_rx_msg.len; i++)
       {
-        if (usb_rx_msg.buf[i] == '\r')
+        if(state == PARSE_IDLE)
         {
-          result = slcan_parse_str(slcan_str, slcan_str_index);
-          if (usb_get_rx_response_en())
+          data_index = 0;
+          if (usb_rx_msg.buf[i] > SLCAN_EH_START)
           {
+            if(slcan_is_enhance_mode())
+              state = PARSE_RAW_LENGTH;
+          }
+          else
+          {
+            state = PARSE_SLCAN;
+          }
+          data[data_index++] = usb_rx_msg.buf[i];
+        }
+        else if(state == PARSE_SLCAN)
+        {
+          //  Process one whole buffer
+          if (usb_rx_msg.buf[i] == '\r')
+          {
+            result = slcan_parse_str(data, data_index);
             if (result == SLCAN_OK)
             {
               cdc_transmit(SLCAN_RET_OK, SLCAN_RET_LEN);
@@ -524,22 +543,45 @@ void usbrxTask(void *argument)
             {
               cdc_transmit(SLCAN_RET_ERR, SLCAN_RET_LEN);
             }
+            state = PARSE_IDLE;
           }
-          slcan_str_index = 0;
-
-          //          break;
-        }
-        else
-        {
-          // Check for overflow of buffer
-          if (slcan_str_index >= SLCAN_MTU)
+          else
           {
-            // TODO: Return here and discard this CDC buffer?
-            slcan_str_index = 0;
-          }
+            // Check for overflow of buffer
+            if (data_index >= SLCAN_MTU)
+            {
+              // TODO: Return here and discard this CDC buffer?
+              state = PARSE_IDLE;
+            }
 
-          slcan_str[slcan_str_index] = usb_rx_msg.buf[i];
-          slcan_str_index++;
+            data[data_index++] = usb_rx_msg.buf[i];
+          }
+        }
+        else if(state == PARSE_RAW_LENGTH)
+        {
+          data[data_index++] = usb_rx_msg.buf[i];
+          raw_length = usb_rx_msg.buf[i] + 2;
+          if(raw_length >= SLCAN_MTU)
+          {
+            state = PARSE_IDLE;
+          }
+          else
+          {
+            state = PARSE_RAW;
+          }
+        }
+        else if(state == PARSE_RAW)
+        {
+          data[data_index++] = usb_rx_msg.buf[i];
+          if(data_index == raw_length)
+          {
+            result = slcan_eh_parse_str(data);
+            if (result == SLCAN_ERROR)
+            {
+              cdc_transmit(SLCAN_RET_ERR, SLCAN_RET_LEN);
+            }
+            state = PARSE_IDLE;
+          }
         }
       }
       osMemoryPoolFree(usb_rx_msg_MemPool, usb_rx_msg.buf);
@@ -555,7 +597,7 @@ void usbrxTask(void *argument)
     }
     else
     {
-      slcan_str_index = 0;
+      state = PARSE_IDLE;
     }
   }
 }
@@ -608,15 +650,6 @@ void cdc_transmit(uint8_t *buf, uint16_t len)
   }
 }
 
-void usb_set_rx_response_en(uint8_t en)
-{
-  usb_rx_response_en = en;
-}
-
-uint8_t usb_get_rx_response_en(void)
-{
-  return usb_rx_response_en;
-}
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 
 /**

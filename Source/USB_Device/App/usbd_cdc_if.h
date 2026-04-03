@@ -112,8 +112,6 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 void cdc_transmit(uint8_t* buf, uint16_t len);
 void cdc_task_monitor(void);
 void cdc_task_init(void);
-void usb_set_rx_response_en(uint8_t en);
-uint8_t usb_get_rx_response_en(void);
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**

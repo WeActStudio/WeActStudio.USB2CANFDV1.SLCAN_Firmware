@@ -19,6 +19,7 @@ static uint32_t __std_dlc_code_to_hal_dlc_code(uint8_t dlc_code);
 static uint8_t __hal_dlc_code_to_std_dlc_code(uint32_t hal_dlc_code);
 
 static uint8_t is_need_to_update = 0;
+static uint8_t is_enhance_mode_on = 0;
 
 // FIXME: Pressing enter repeats the previous TX
 void slcan_init(void)
@@ -27,9 +28,19 @@ void slcan_init(void)
 	can_disable();
 }
 
+uint8_t slcan_is_enhance_mode(void)
+{
+	return is_enhance_mode_on;
+}
+
 // Parse an incoming CAN frame into an outgoing slcan message
 int32_t slcan_parse_frame(uint8_t *buf, FDCAN_RxHeaderTypeDef *frame_header, uint8_t *frame_data)
 {
+	if(is_enhance_mode_on)
+	{
+		return slcan_eh_parse_frame(buf, frame_header, frame_data);
+	}
+
 	// Clear buffer
 	for (uint8_t j = 0; j < SLCAN_MTU; j++)
 		buf[j] = '\0';
@@ -101,10 +112,13 @@ int32_t slcan_parse_frame(uint8_t *buf, FDCAN_RxHeaderTypeDef *frame_header, uin
 		return -1;
 
 	// Add data bytes
-	for (uint8_t j = 0; j < bytes; j++)
+	if(frame_header->RxFrameType != FDCAN_REMOTE_FRAME)
 	{
-		buf[msg_idx++] = (frame_data[j] >> 4);
-		buf[msg_idx++] = (frame_data[j] & 0x0F);
+		for (uint8_t j = 0; j < bytes; j++)
+		{
+			buf[msg_idx++] = (frame_data[j] >> 4);
+			buf[msg_idx++] = (frame_data[j] & 0x0F);
+		}
 	}
 
 	// Convert to ASCII (2nd character to end)
@@ -130,7 +144,11 @@ int32_t slcan_parse_frame(uint8_t *buf, FDCAN_RxHeaderTypeDef *frame_header, uin
 // Parse an incoming slcan command from the USB CDC port
 int32_t slcan_parse_str(uint8_t *buf, uint8_t len)
 {
-	int32_t return_value = 2;
+	int32_t return_value = SLCAN_WAIT;
+
+	// Start parsing at second byte (skip command byte)
+	uint8_t parse_loc = 1;
+	uint8_t id_len;
 
 	can_tx_msg_t *tx_msg;
 	tx_msg = (can_tx_msg_t *)osMemoryPoolAlloc(can_tx_msg_MemPool, 0U);
@@ -357,6 +375,85 @@ int32_t slcan_parse_str(uint8_t *buf, uint8_t len)
 	}
 	break;
 
+	// Enhance mode toggle
+	case 'H':
+	{
+		if (len == 2)
+		{
+			return_value = SLCAN_OK;
+			// Set enhance mode command
+			if (buf[1] == 1)
+			{
+				// enhance mode enabled
+				is_enhance_mode_on = 1;
+			}
+			else if (buf[1] == 0)
+			{
+				// enhance mode disabled (default)
+				is_enhance_mode_on = 0;
+			}
+			else
+			{
+				return_value = SLCAN_ERROR;
+			}
+		}
+		else
+		{
+			return_value = SLCAN_ERROR;
+		}
+	}
+	break;
+
+	case 'f':
+	{
+		if (len == 7 && (can_is_enable() == OFF_BUS))
+		{
+			return_value = SLCAN_OK;
+			// Set standard ID filter
+			uint16_t std_id = 0, std_mask = 0;
+			id_len = 3;
+			while (parse_loc <= id_len)
+			{
+				std_mask <<= 4;
+				std_mask |= buf[parse_loc+3];
+				std_id <<= 4;
+				std_id |= buf[parse_loc++];
+			}
+			can_set_std_filter(std_id, std_mask);
+			return_value = SLCAN_OK;
+		}
+		else
+		{
+			return_value = SLCAN_ERROR;
+		}
+	}
+	break;
+
+	case 'F':
+	{
+		if (len == 17 && (can_is_enable() == OFF_BUS))
+		{
+			return_value = SLCAN_OK;
+			// Set extended ID filter
+			uint32_t ext_id = 0, ext_mask = 0;
+			id_len = 8;
+			while (parse_loc <= id_len)
+			{
+				ext_mask <<= 4;
+				ext_mask |= buf[parse_loc+8];
+				ext_id <<= 4;
+				ext_id |= buf[parse_loc++];
+			}
+			can_set_ext_filter(ext_id, ext_mask);
+			return_value = SLCAN_OK;
+		}
+		else
+		{
+			return_value = SLCAN_ERROR;
+		}
+	}
+	break;
+
 	// FIXME: Nonstandard!
 	case 'V':
 	{
@@ -483,7 +580,7 @@ int32_t slcan_parse_str(uint8_t *buf, uint8_t len)
 	}
 
 	// if need return
-	if (return_value != 2)
+	if (return_value != SLCAN_WAIT)
 	{
 	return_now:
 		osMemoryPoolFree(can_tx_msg_MemPool, tx_msg);
@@ -496,13 +593,8 @@ int32_t slcan_parse_str(uint8_t *buf, uint8_t len)
 		return SLCAN_ERROR;
 	}
 
-	// Start parsing at second byte (skip command byte)
-	uint8_t parse_loc = 1;
-
 	// Zero out identifier
 	tx_msg->header.Identifier = 0;
-
-	uint8_t id_len;
 
 	// Update length if message is extended ID
 	if (tx_msg->header.IdType == FDCAN_EXTENDED_ID)
@@ -546,7 +638,7 @@ int32_t slcan_parse_str(uint8_t *buf, uint8_t len)
 	}
 
 	// Check if len != command + id + length + bytes_in_msg
-	uint8_t tx_msg_len = 1 + id_len + 1 + (bytes_in_msg << 1);
+	uint8_t tx_msg_len = 1 + id_len + 1 + (tx_msg->header.TxFrameType == FDCAN_REMOTE_FRAME? 0 : (bytes_in_msg << 1));
 
 	if (tx_msg_len != len)
 	{
@@ -556,10 +648,230 @@ int32_t slcan_parse_str(uint8_t *buf, uint8_t len)
 
 	// Parse data
 	// TODO: Guard against walking off the end of the string!
-	for (uint8_t i = 0; i < bytes_in_msg; i++)
+	if(tx_msg->header.TxFrameType != FDCAN_REMOTE_FRAME)
 	{
-		tx_msg->data[i] = (buf[parse_loc] << 4) + buf[parse_loc + 1];
-		parse_loc += 2;
+		for (uint8_t i = 0; i < bytes_in_msg; i++)
+		{
+			tx_msg->data[i] = (buf[parse_loc] << 4) + buf[parse_loc + 1];
+			parse_loc += 2;
+		}
+	}
+
+	// Transmit the message
+	return_value = can_tx(tx_msg);
+
+	return return_value;
+}
+
+int32_t slcan_eh_parse_frame(uint8_t *buf, FDCAN_RxHeaderTypeDef *frame_header, uint8_t *frame_data)
+{
+	int32_t msg_len = 0;
+
+	slcan_eh_msg_t *msg = (slcan_eh_msg_t *)buf;
+
+	// Handle classic CAN frames
+	if (frame_header->FDFormat == FDCAN_CLASSIC_CAN)
+	{
+		// Add character for frame type
+		if (frame_header->RxFrameType == FDCAN_DATA_FRAME)
+		{
+			msg->header = SLCAN_STD_HEADER + SLCAN_EH_START;
+		}
+		else if (frame_header->RxFrameType == FDCAN_REMOTE_FRAME)
+		{
+			msg->header = SLCAN_STD_REMOTE_HEADER + SLCAN_EH_START;
+		}
+	}
+	// Handle FD CAN frames
+	else
+	{
+		// FD doesn't support remote frames so this must be a data frame
+
+		// Frame with BRS enabled
+		if (frame_header->BitRateSwitch == FDCAN_BRS_ON)
+		{
+			msg->header = SLCAN_STD_FDBRS_HEADER + SLCAN_EH_START;
+		}
+		// Frame with BRS disabled
+		else
+		{
+			msg->header = SLCAN_STD_FD_HEADER + SLCAN_EH_START;
+		}
+	}
+
+	int8_t bytes = hal_dlc_code_to_bytes(frame_header->DataLength);
+	if (bytes < 0)
+		return -1;
+
+	if (frame_header->IdType == FDCAN_EXTENDED_ID)
+	{
+		// Convert first char to upper case for extended frame
+		msg->header -= 32;
+
+		msg->frame.ext_frame.ext_id = frame_header->Identifier;
+		msg->frame.ext_frame.dlc = __hal_dlc_code_to_std_dlc_code(frame_header->DataLength);
+        
+		if (frame_header->RxFrameType != FDCAN_REMOTE_FRAME)
+		{
+			memcpy(msg->frame.ext_frame.data, frame_data, bytes);
+			msg_len = SLCAN_EH_EXT_ID_LEN + 1 + bytes;
+		}
+		else
+		{
+			msg_len = SLCAN_EH_EXT_ID_LEN + 1;
+		}
+
+		msg->length = msg_len;
+	}
+	else
+	{
+		msg->frame.std_frame.std_id = frame_header->Identifier;
+		msg->frame.std_frame.dlc = __hal_dlc_code_to_std_dlc_code(frame_header->DataLength);
+
+		if (frame_header->RxFrameType != FDCAN_REMOTE_FRAME)
+		{
+			memcpy(msg->frame.std_frame.data, frame_data, bytes);
+			msg_len = SLCAN_EH_STD_ID_LEN + 1 + bytes;
+		}
+		else
+		{
+			msg_len = SLCAN_EH_STD_ID_LEN + 1;
+		}
+
+		msg->length = msg_len;
+	}
+	return msg_len + 2;
+}
+
+int32_t slcan_eh_parse_str(uint8_t *buf)
+{
+	int32_t return_value = SLCAN_WAIT;
+
+	uint8_t id_len = 0;
+	uint8_t data_len = 0;
+	uint8_t dlc = 0;
+	uint8_t *data;
+	can_tx_msg_t *tx_msg;
+
+	slcan_eh_msg_t *msg = (slcan_eh_msg_t *)buf;
+
+	if(can_is_enable() == OFF_BUS)
+		return SLCAN_ERROR;
+		
+	tx_msg = (can_tx_msg_t *)osMemoryPoolAlloc(can_tx_msg_MemPool, 0U);
+	if(tx_msg == NULL)
+		return SLCAN_ERROR;
+
+	tx_msg->header.TxFrameType = FDCAN_DATA_FRAME;
+	tx_msg->header.FDFormat = FDCAN_CLASSIC_CAN;
+	tx_msg->header.IdType = FDCAN_STANDARD_ID;
+	tx_msg->header.BitRateSwitch = FDCAN_BRS_OFF;
+	tx_msg->header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+	tx_msg->header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+	tx_msg->header.MessageMarker = 0;
+	memset(tx_msg->data, 0x00, sizeof(tx_msg->data));
+
+	switch (msg->header)
+	{
+	case SLCAN_STD_HEADER + SLCAN_EH_START:
+		id_len = SLCAN_EH_STD_ID_LEN;
+		tx_msg->header.Identifier = msg->frame.std_frame.std_id;
+		dlc = msg->frame.std_frame.dlc;
+		data = msg->frame.std_frame.data;
+		data_len = msg->length - id_len - 1;
+		break;
+	case SLCAN_EXT_HEADER + SLCAN_EH_START:
+		id_len = SLCAN_EH_EXT_ID_LEN;
+		tx_msg->header.IdType = FDCAN_EXTENDED_ID;
+		tx_msg->header.Identifier = msg->frame.ext_frame.ext_id;
+		dlc = msg->frame.ext_frame.dlc;
+		data = msg->frame.ext_frame.data;
+		data_len = msg->length - id_len - 1;
+		break;
+	case SLCAN_STD_REMOTE_HEADER + SLCAN_EH_START:
+		tx_msg->header.Identifier = msg->frame.std_frame.std_id;
+		tx_msg->header.TxFrameType = FDCAN_REMOTE_FRAME;
+		dlc = msg->frame.std_frame.dlc;
+		data = msg->frame.std_frame.data;
+		data_len = 0;
+		break;
+	case SLCAN_EXT_REMOTE_HEADER + SLCAN_EH_START:
+		tx_msg->header.IdType = FDCAN_EXTENDED_ID;
+		tx_msg->header.Identifier = msg->frame.ext_frame.ext_id;
+		tx_msg->header.TxFrameType = FDCAN_REMOTE_FRAME;
+		dlc = msg->frame.ext_frame.dlc;
+		data = msg->frame.ext_frame.data;
+		data_len = 0;
+		break;
+	case SLCAN_STD_FD_HEADER + SLCAN_EH_START:
+		id_len = SLCAN_EH_STD_ID_LEN;
+		tx_msg->header.FDFormat = FDCAN_FD_CAN;
+		tx_msg->header.Identifier = msg->frame.std_frame.std_id;
+		dlc = msg->frame.std_frame.dlc;
+		data = msg->frame.std_frame.data;
+		data_len = msg->length - id_len - 1;
+		break;
+	case SLCAN_EXT_FD_HEADER + SLCAN_EH_START:
+		id_len = SLCAN_EH_EXT_ID_LEN;
+		tx_msg->header.FDFormat = FDCAN_FD_CAN;
+		tx_msg->header.IdType = FDCAN_EXTENDED_ID;
+		tx_msg->header.Identifier = msg->frame.ext_frame.ext_id;
+		dlc = msg->frame.ext_frame.dlc;
+		data = msg->frame.ext_frame.data;
+		data_len = msg->length - id_len - 1;
+		break;
+	case SLCAN_STD_FDBRS_HEADER + SLCAN_EH_START:
+		id_len = SLCAN_EH_STD_ID_LEN;
+		tx_msg->header.FDFormat = FDCAN_FD_CAN;
+		tx_msg->header.Identifier = msg->frame.std_frame.std_id;
+		tx_msg->header.BitRateSwitch = FDCAN_BRS_ON;
+		dlc = msg->frame.std_frame.dlc;
+		data = msg->frame.std_frame.data;
+		data_len = msg->length - id_len - 1;
+		break;
+	case SLCAN_EXT_FDBRS_HEADER + SLCAN_EH_START:
+		id_len = SLCAN_EH_EXT_ID_LEN;
+		tx_msg->header.FDFormat = FDCAN_FD_CAN;
+		tx_msg->header.IdType = FDCAN_EXTENDED_ID;
+		tx_msg->header.Identifier = msg->frame.ext_frame.ext_id;
+		tx_msg->header.BitRateSwitch = FDCAN_BRS_ON;
+		dlc = msg->frame.ext_frame.dlc;
+		data = msg->frame.ext_frame.data;
+		data_len = msg->length - id_len - 1;
+		break;
+
+	default:
+		return_value = SLCAN_ERROR;
+		break;
+	}
+
+	if (return_value != SLCAN_WAIT)
+	{
+	return_now:
+		osMemoryPoolFree(can_tx_msg_MemPool, tx_msg);
+		return return_value;
+	}
+
+	// Set TX frame DLC according to HAL
+	tx_msg->header.DataLength = __std_dlc_code_to_hal_dlc_code(dlc);
+	int8_t bytes_in_msg = hal_dlc_code_to_bytes(tx_msg->header.DataLength);
+
+	if ((bytes_in_msg < 0))
+	{
+		return_value = SLCAN_ERROR;
+		goto return_now;
+	}
+
+	// Set TX frame data
+	if(tx_msg->header.TxFrameType != FDCAN_REMOTE_FRAME)
+	{
+		if(bytes_in_msg == data_len)
+			memcpy(tx_msg->data, data, data_len);
+		else
+		{
+			return_value = SLCAN_ERROR;
+			goto return_now;
+		}
 	}
 
 	// Transmit the message

@@ -19,6 +19,11 @@ extern FDCAN_HandleTypeDef can_handle;
 enum can_bus_state bus_state;
 uint32_t can_mode = FDCAN_MODE_NORMAL;
 FunctionalState can_autoretransmit = DISABLE;
+uint16_t can_std_filter_id = 0;
+uint16_t can_std_filter_mask = 0;
+uint32_t can_ext_filter_id = 0;
+uint32_t can_ext_filter_mask = 0;
+
 uint32_t can_tx_frame_count = 0;
 
 // Structure for CAN/FD bitrate configuration
@@ -60,13 +65,15 @@ void can_init(void)
     can_set_bitrate(CAN_BITRATE_125K);
     can_set_data_bitrate(CAN_DATA_BITRATE_2M);
     can_set_silent(0);
+    can_set_std_filter(0, 0);
+    can_set_ext_filter(0, 0);
     bus_state = OFF_BUS;
 
-    can_tx_Queue = xQueueCreate(16, sizeof(uint32_t));
-    can_rx_Queue = xQueueCreate(16, sizeof(uint32_t));
+    can_tx_Queue = xQueueCreate(128, sizeof(uint32_t));
+    can_rx_Queue = xQueueCreate(128, sizeof(uint32_t));
 
-    can_tx_msg_MemPool = osMemoryPoolNew(16, sizeof(can_tx_msg_t), NULL);
-    can_rx_msg_MemPool = osMemoryPoolNew(16, sizeof(can_rx_msg_t), NULL);
+    can_tx_msg_MemPool = osMemoryPoolNew(128, sizeof(can_tx_msg_t), NULL);
+    can_rx_msg_MemPool = osMemoryPoolNew(128, sizeof(can_rx_msg_t), NULL);
 
     cantxTaskHandle = osThreadNew(cantxTask, NULL, &cantxTask_attributes);
     canrxTaskHandle = osThreadNew(canrxTask, NULL, &canrxTask_attributes);
@@ -112,10 +119,10 @@ void can_enable(void)
         FDCAN_FilterTypeDef FDCAN1_RXFilter;
         FDCAN1_RXFilter.IdType = FDCAN_STANDARD_ID;
         FDCAN1_RXFilter.FilterIndex = 0;
-        FDCAN1_RXFilter.FilterType = FDCAN_FILTER_RANGE;
+        FDCAN1_RXFilter.FilterType = FDCAN_FILTER_MASK;
         FDCAN1_RXFilter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-        FDCAN1_RXFilter.FilterID1 = 0;
-        FDCAN1_RXFilter.FilterID2 = 0x7ff;
+        FDCAN1_RXFilter.FilterID1 = can_std_filter_id;
+        FDCAN1_RXFilter.FilterID2 = can_std_filter_mask;
         if (HAL_FDCAN_ConfigFilter(&can_handle, &FDCAN1_RXFilter) != HAL_OK)
         {
             while (1)
@@ -124,10 +131,10 @@ void can_enable(void)
 
         FDCAN1_RXFilter.IdType = FDCAN_EXTENDED_ID;
         FDCAN1_RXFilter.FilterIndex = 0;
-        FDCAN1_RXFilter.FilterType = FDCAN_FILTER_RANGE;
+        FDCAN1_RXFilter.FilterType = FDCAN_FILTER_MASK;
         FDCAN1_RXFilter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-        FDCAN1_RXFilter.FilterID1 = 0;
-        FDCAN1_RXFilter.FilterID2 = 0x1FFFFFFF;
+        FDCAN1_RXFilter.FilterID1 = can_ext_filter_id;
+        FDCAN1_RXFilter.FilterID2 = can_ext_filter_mask;
         if (HAL_FDCAN_ConfigFilter(&can_handle, &FDCAN1_RXFilter) != HAL_OK)
         {
             while (1)
@@ -467,6 +474,26 @@ void can_set_autoretransmit(uint8_t autoretransmit)
     {
         can_autoretransmit = DISABLE;
     }
+}
+
+void can_set_std_filter(uint16_t id, uint16_t mask)
+{
+    if (bus_state == ON_BUS)
+    {
+        return;
+    }
+    can_std_filter_id = id;
+    can_std_filter_mask = mask;
+}
+
+void can_set_ext_filter(uint32_t id, uint32_t mask)
+{
+    if (bus_state == ON_BUS)
+    {
+        return;
+    }
+    can_ext_filter_id = id;
+    can_ext_filter_mask = mask;
 }
 
 // Send a message on the CAN bus.
